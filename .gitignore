@@ -1,0 +1,34 @@
+# Build
+build/
+bin/
+obj/
+*.dir/
+*.log
+
+# Visual Studio / Windows
+.vs/
+*.sln
+*.vcxproj*
+*.user
+x64/
+x86/
+
+# Android / Gradle
+.gradle/
+local.properties
+.idea/
+*.iml
+.cxx/
+build/
+captures/
+*.apk
+*.aab
+
+# Cooked Assets / Binaries
+assets_cooked/
+*.spv
+*.bin
+
+# OS Junk
+.DS_Store
+Thumbs.db
