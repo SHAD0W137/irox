@@ -23,6 +23,7 @@ build/
 captures/
 *.apk
 *.aab
+*.hprof
 
 # Cooked Assets / Binaries
 assets_cooked/

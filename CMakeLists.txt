@@ -1,135 +1,171 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.25)
 project(irox LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# -----------------------------------------------------------------------------
-# Platform Detection
-# -----------------------------------------------------------------------------
-if(WIN32)
-    message(STATUS "[irox] Configuring for Windows PC")
-    add_compile_definitions(IROX_PLATFORM_WINDOWS)
-elseif(ANDROID)
-    message(STATUS "[irox] Configuring for Android (ABI: ${ANDROID_ABI})")
-    add_compile_definitions(IROX_PLATFORM_ANDROID)
-else()
-    message(STATUS "[irox] Configuring for Linux / Headless")
-    add_compile_definitions(IROX_PLATFORM_LINUX)
-endif()
-
-# Global output paths
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
-# -----------------------------------------------------------------------------
-# Third-Party Dependencies (Vulkan, Math, etc.)
-# -----------------------------------------------------------------------------
-if(NOT ANDROID AND NOT IROX_HEADLESS)
-    find_package(Vulkan REQUIRED)
-endif()
-
-# -----------------------------------------------------------------------------
-# Module: engine
-# -----------------------------------------------------------------------------
-file(GLOB_RECURSE ENGINE_SOURCES 
-    "engine/core/*.cpp"
-    "engine/ecs/*.cpp"
-    "engine/spatial/*.cpp"
-    "engine/network/*.cpp"
-    "engine/input/*.cpp"
+add_compile_definitions(IROX_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+add_compile_definitions(
+    GLM_FORCE_RADIANS
+    GLM_FORCE_DEPTH_ZERO_TO_ONE
 )
 
-# Platform-specific engine sources
-if(WIN32)
-    file(GLOB_RECURSE PLATFORM_SOURCES "engine/platform/windows/*.cpp")
-elseif(ANDROID)
-    file(GLOB_RECURSE PLATFORM_SOURCES "engine/platform/android/*.cpp")
+if (MSVC)
+    add_compile_options(/fp:precise)
+    # Ensure standard FMA generation without arbitrary fused contractions
+    add_compile_options(/fp:except-)
+else()
+    # Clang on Windows and Android NDK
+    add_compile_options(-fno-fast-math -ffp-contract=off)
 endif()
-list(APPEND ENGINE_SOURCES ${PLATFORM_SOURCES})
 
-# Graphics sources (omit for headless servers)
-if(NOT IROX_HEADLESS)
-    file(GLOB_RECURSE RENDER_SOURCES "engine/render/*.cpp")
-    list(APPEND ENGINE_SOURCES ${RENDER_SOURCES})
+# Box3D Physics Engine 
+include(FetchContent)
+set(FETCHCONTENT_QUIET TRUE)
+
+# No demos or samples
+set(BOX3D_SAMPLES OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    box3d
+    URL https://github.com/erincatto/box3d/archive/refs/heads/main.zip
+)
+FetchContent_MakeAvailable(box3d)
+
+# Platform-specific dependencies
+if(ANDROID)
+    find_package(Vulkan REQUIRED)
+    find_package(SDL3 REQUIRED CONFIG)
+
+    add_compile_definitions(IROX_PLATFORM_ANDROID)
+    add_compile_options(-Wno-nullability-completeness)
+
+    include(FetchContent)
+    set(FETCHCONTENT_QUIET TRUE)
+
+    # GLM / VMA
+    FetchContent_Declare(glm URL https://github.com/g-truc/glm/releases/download/1.0.3/glm-1.0.3.zip)
+    FetchContent_Declare(vma URL https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator/archive/refs/tags/v3.1.0.zip)
+
+    # Valve GNS headers
+    FetchContent_Declare(
+        gns_headers
+        URL https://github.com/ValveSoftware/GameNetworkingSockets/archive/refs/tags/v1.4.1.zip
+    )
+    FetchContent_GetProperties(gns_headers)
+    if(NOT gns_headers_POPULATED)
+        FetchContent_Populate(gns_headers)
+    endif()
+
+    FetchContent_MakeAvailable(glm vma)
+
+    # ARM64 .so Valve GNS library
+    add_library(GameNetworkingSockets SHARED IMPORTED)
+    set_target_properties(GameNetworkingSockets PROPERTIES
+        IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/apps/android/app/src/main/jniLibs/arm64-v8a/libGameNetworkingSockets.so"
+    )
+
+else()
+    if(DEFINED ENV{VULKAN_SDK})
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}/lib/cmake/SDL3")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}/lib/cmake")
+    endif()
+
+    find_package(Vulkan REQUIRED)
+    find_package(SDL3 REQUIRED)
+
+    find_library(SLANG_LIB NAMES slang PATHS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
+    add_library(Slang::Slang UNKNOWN IMPORTED)
+    set_target_properties(Slang::Slang PROPERTIES
+        IMPORTED_LOCATION "${SLANG_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "$ENV{VULKAN_SDK}/Include"
+    )
+
+    find_package(glm CONFIG REQUIRED)
+    find_package(fastgltf CONFIG REQUIRED)
+    find_package(KTX CONFIG REQUIRED)
+    find_package(Stb REQUIRED)
+    find_package(GameNetworkingSockets CONFIG REQUIRED)
+
+    add_library(stb_image INTERFACE)
+    target_include_directories(stb_image INTERFACE ${Stb_INCLUDE_DIR})
+endif()
+
+# Engine source
+set(ENGINE_SOURCES
+    engine/render/GPUMemoryManager.cpp
+    engine/render/ShaderCompiler.cpp
+    engine/render/VulkanContext.cpp
+    engine/render/MeshGenerator.cpp
+    engine/network/NetworkManager.cpp   
+    game/client/systems/CameraSystem.cpp
+    game/client/systems/RenderSystem.cpp
+    game/shared/systems/CharacterMovementSystem.cpp
+    game/shared/systems/PhysicsSystem.cpp  
+    game/scenes/SandboxScene.cpp
+)
+
+# Model loaders only for PC
+if(NOT ANDROID)
+    list(APPEND ENGINE_SOURCES
+        engine/assets/KtxTextureLoader.cpp
+        engine/assets/GltfLoader.cpp
+    )
 endif()
 
 add_library(irox_engine STATIC ${ENGINE_SOURCES})
-target_include_directories(irox_engine PUBLIC 
+
+target_include_directories(irox_engine PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/engine
+    ${CMAKE_CURRENT_SOURCE_DIR}/game
+    ${Vulkan_INCLUDE_DIRS}
 )
 
-if(WIN32 AND NOT IROX_HEADLESS)
-    target_link_libraries(irox_engine PUBLIC Vulkan::Vulkan)
-elseif(ANDROID)
-    target_link_libraries(irox_engine PUBLIC android log vulkan)
-endif()
-
-# -----------------------------------------------------------------------------
-# Module: game
-# -----------------------------------------------------------------------------
-file(GLOB_RECURSE GAME_SHARED_SOURCES "game/shared/*.cpp")
-file(GLOB_RECURSE GAME_CLIENT_SOURCES "game/client/*.cpp")
-file(GLOB_RECURSE GAME_SERVER_SOURCES "game/server/*.cpp")
-
-# Game Shared (All targets)
-add_library(irox_game_shared STATIC ${GAME_SHARED_SOURCES})
-target_include_directories(irox_game_shared PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/game/shared)
-target_link_libraries(irox_game_shared PUBLIC irox_engine)
-
-# Game Client (Client + Standalone)
-add_library(irox_game_client STATIC ${GAME_CLIENT_SOURCES})
-target_include_directories(irox_game_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/game/client)
-target_link_libraries(irox_game_client PUBLIC irox_game_shared)
-
-# Game Server (Server + Standalone)
-add_library(irox_game_server STATIC ${GAME_SERVER_SOURCES})
-target_include_directories(irox_game_server PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/game/server)
-target_link_libraries(irox_game_server PUBLIC irox_game_shared)
-
-# -----------------------------------------------------------------------------
-# Apps / Executables
-# -----------------------------------------------------------------------------
-if(WIN32)
-    # 1. Standalone Singleplayer / Host App
-    add_executable(irox_standalone "apps/standalone/main.cpp")
-    target_link_libraries(irox_standalone PRIVATE 
-        irox_engine 
-        irox_game_shared 
-        irox_game_client 
-        irox_game_server
+if(ANDROID)
+    target_include_directories(irox_engine PUBLIC
+        ${glm_SOURCE_DIR}
+        ${vma_SOURCE_DIR}/include
+        ${gns_headers_SOURCE_DIR}/include
     )
-
-    # 2. Dedicated Server App (Headless)
-    add_executable(irox_server "apps/dedicated_server/main.cpp")
-    target_link_libraries(irox_server PRIVATE 
-        irox_engine 
-        irox_game_shared 
-        irox_game_server
-    )
-
-    # 3. Remote Client App
-    add_executable(irox_client "apps/remote_client/main.cpp")
-    target_link_libraries(irox_client PRIVATE 
-        irox_engine 
-        irox_game_shared 
-        irox_game_client
-    )
-
-elseif(ANDROID)
-    # Android uses a native shared library (.so) packaged into the APK
-    add_library(irox_android SHARED 
-        "apps/android/app/src/main/cpp/android_main.cpp"
-    )
-    target_link_libraries(irox_android PRIVATE 
-        irox_engine 
-        irox_game_shared 
-        irox_game_client 
-        irox_game_server
+    target_link_libraries(irox_engine PUBLIC
+        Vulkan::Vulkan
+        SDL3::SDL3
+        GameNetworkingSockets
         android
         log
-        native_app_glue
+        box3d::box3d
     )
+else()
+    target_include_directories(irox_engine PUBLIC "$ENV{VULKAN_SDK}/Include")
+    target_link_libraries(irox_engine PUBLIC
+        Vulkan::Vulkan
+        SDL3::SDL3
+        Slang::Slang
+        glm::glm
+        fastgltf::fastgltf
+        KTX::ktx
+        stb_image
+        GameNetworkingSockets::GameNetworkingSockets
+        box3d::box3d
+    )
+    if(WIN32)
+        target_link_libraries(irox_engine PUBLIC ws2_32 crypt32)
+    endif()
+endif()
+
+# Targets
+if(ANDROID)
+    add_library(main SHARED apps/standalone/main.cpp)
+    target_include_directories(main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(main PRIVATE irox_engine)
+else()
+    add_executable(irox apps/standalone/main.cpp)
+    target_include_directories(irox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(irox PRIVATE irox_engine)
+
+    add_executable(irox_server apps/dedicated_server/main.cpp)
+    target_include_directories(irox_server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(irox_server PRIVATE irox_engine)
 endif()

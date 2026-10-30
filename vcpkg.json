@@ -1,0 +1,11 @@
+{
+  "name": "irox",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "glm",
+    "fastgltf",
+    "ktx",
+    "stb",
+    "gamenetworkingsockets"
+  ]
+}
