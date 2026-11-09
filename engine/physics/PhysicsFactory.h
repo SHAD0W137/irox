@@ -38,7 +38,7 @@ public:
         float halfHeight
     ) {
         b3BodyDef bodyDef = b3DefaultBodyDef();
-        bodyDef.type = b3_dynamicBody; // Calculating jump via physics engine
+        bodyDef.type = b3_dynamicBody;
         bodyDef.position = b3Vec3 { position.x, position.y, position.z };
 
         // All rotations are frozen

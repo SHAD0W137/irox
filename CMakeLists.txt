@@ -157,11 +157,11 @@ endif()
 
 # Targets
 if(ANDROID)
-    add_library(main SHARED apps/standalone/main.cpp)
+    add_library(main SHARED apps/client/main.cpp)
     target_include_directories(main PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(main PRIVATE irox_engine)
 else()
-    add_executable(irox apps/standalone/main.cpp)
+    add_executable(irox apps/client/main.cpp)
     target_include_directories(irox PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(irox PRIVATE irox_engine)
 

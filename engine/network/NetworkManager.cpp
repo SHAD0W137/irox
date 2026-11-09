@@ -160,14 +160,35 @@ bool NetworkManager::sendPacket(HSteamNetConnection conn, const void* data, size
     return m_interface->SendMessageToConnection(conn, data, static_cast<uint32_t>(size), sendFlags, nullptr) == k_EResultOK;
 }
 
-void NetworkManager::broadcastPacket(const void* data, size_t size, bool reliable) {
+NetworkManager::~NetworkManager() {
+    shutdown();
+}
+
+void NetworkManager::broadcastSnapshot(const WorldSnapshotPacket& packet) {
+    if (m_clientConnections.empty()) return;
+
+    constexpr size_t headerSize = sizeof(PacketType) + 3 + (3 * sizeof(uint32_t)); // 16 bytes
+    const size_t totalSize = headerSize + (packet.entityCount * sizeof(EntitySnapshotData));
+
     for (auto conn : m_clientConnections) {
-        sendPacket(conn, data, size, reliable);
+        m_interface->SendMessageToConnection(conn, &packet, static_cast<uint32_t>(totalSize),
+            k_nSteamNetworkingSend_UnreliableNoDelay, nullptr);
     }
 }
 
-NetworkManager::~NetworkManager() {
-    shutdown();
+NetworkStats NetworkManager::getConnectionStats(HSteamNetConnection conn) {
+    NetworkStats stats {};
+    if (!m_interface) return stats;
+
+    SteamNetConnectionRealTimeStatus_t status;
+    if (m_interface->GetConnectionRealTimeStatus(conn, &status, 0, nullptr) == k_EResultOK) {
+        stats.pingMs = status.m_nPing;
+        stats.qualityLocal = status.m_flConnectionQualityLocal;
+        stats.qualityRemote = status.m_flConnectionQualityRemote;
+        stats.inPacketLossPercent = (1.0f - std::clamp(status.m_flConnectionQualityLocal, 0.0f, 1.0f)) * 100.0f;
+        stats.outPacketLossPercent = (1.0f - std::clamp(status.m_flConnectionQualityRemote, 0.0f, 1.0f)) * 100.0f;
+    }
+    return stats;
 }
 
 } // namespace irox::net

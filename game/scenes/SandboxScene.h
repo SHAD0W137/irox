@@ -7,19 +7,31 @@
 
 namespace irox {
 
+enum class NetworkMode : uint8_t {
+    Client,        // Client with prediction & server authority
+    Singleplayer,  // Local simulation only (zero networking, zero prediction overhead)
+    ListenServer   // Host player (simulates world, local player has no prediction, acts as server)
+};
+
 class SandboxScene {
 public:
-    void init(ecs::World& world, VulkanContext& context);
+    void init(ecs::World& world, VulkanContext& context, NetworkMode mode);
     void shutdown(ecs::World& world, VulkanContext& context);
+
     void fixedUpdate(ecs::World& world, float fixedDt);
     void update(ecs::World& world, float aspectRatio, float deltaTime);
     void render(ecs::World& world, VkCommandBuffer cmd, VulkanContext& context);
 
     void setLocalNetworkId(uint32_t netId) { m_localNetworkId = netId; }
     void applyWorldSnapshot(ecs::World& world, VulkanContext& context, const net::WorldSnapshotPacket& snapshot);
+
     [[nodiscard]] ecs::Entity getLocalPlayerEntity() const noexcept { return m_localPlayerEntity; }
+    [[nodiscard]] NetworkMode getNetworkMode() const noexcept { return m_networkMode; }
+
+    [[nodiscard]] uint32_t getLocalNetworkId() const noexcept { return m_localNetworkId; }
 
 private:
+    NetworkMode m_networkMode = NetworkMode::Client;
     ecs::Entity m_cameraEntity = ecs::NULL_ENTITY;
     ecs::Entity m_planeEntity = ecs::NULL_ENTITY;
     ecs::Entity m_localPlayerEntity = ecs::NULL_ENTITY;

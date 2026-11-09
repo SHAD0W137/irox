@@ -8,7 +8,7 @@ namespace irox {
 
 class CharacterMovementSystem {
 public:
-    // Step simulation fucntion for rollback
+    // Standard 60 Hz physics step
     static void step(
         RigidBodyComponent& rb,
         CharacterControllerComponent& controller,
@@ -16,7 +16,15 @@ public:
         bool jumpRequested
     );
 
-    // Standard ECS step
+    // Overwatch catch-up displacement for inputs clumped during lag spikes
+    static void catchUpStep(
+        RigidBodyComponent& rb,
+        CharacterControllerComponent& controller,
+        const glm::vec3& moveDir,
+        bool jumpRequested,
+        float dt
+    );
+
     static void update(ecs::World& world, float fixedDt);
 };
 

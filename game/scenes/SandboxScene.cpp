@@ -23,17 +23,27 @@ constexpr bool ENABLE_PREDICTION = true;
 
 namespace irox {
 
-void SandboxScene::init(ecs::World& world, VulkanContext& context) {
+void SandboxScene::init(ecs::World& world, VulkanContext& context, NetworkMode mode) {
+    m_networkMode = mode;
+
+    world.reserveEntities(4096);
+    world.setComponentBudget<TransformComponent>(4096);
+    world.setComponentBudget<MeshComponent>(4096);
+    world.setComponentBudget<RigidBodyComponent>(1024);
+    world.setComponentBudget<CapsuleColliderComponent>(1024);
+    world.setComponentBudget<CharacterControllerComponent>(64);
+    world.setComponentBudget<PlayerInputComponent>(64);
+    world.setComponentBudget<CameraComponent>(8);
+    world.setComponentBudget<LocalPlayerPredictionComponent>(4);
+
     createPipeline(context);
     createGridTexture(context);
     createPlayerTextures(context);
 
-    // Initializeing Box3D world
     auto& physics = world.setSingleton<physics::PhysicsWorldSingleton>();
     physics.init(-18.0f);
 
-    // Creating physical floor below Y=0 surface
-    auto groundRb = physics::PhysicsFactory::createStaticGroundBox(
+    physics::PhysicsFactory::createStaticGroundBox(
         physics.worldId, glm::vec3(0.0f, -0.5f, 0.0f), glm::vec3(25.0f, 0.5f, 25.0f)
     );
 
@@ -46,19 +56,22 @@ void SandboxScene::init(ecs::World& world, VulkanContext& context) {
         .target = { 0.0f, 1.0f, 0.0f }
     });
 
-    // Visual floor surface
+    // Floor Mesh Setup
     auto planeData = MeshGenerator::createPlane(50.0f, 50.0f, 25.0f, 25.0f);
     m_planeEntity = world.createEntity();
     world.addComponent<TransformComponent>(m_planeEntity, TransformComponent { .position = { 0.0f, 0.0f, 0.0f } });
-    // world.addComponent<RigidBodyComponent>(m_planeEntity, groundRb);
 
-    MeshComponent planeMesh;
     VkDeviceSize pVSize = sizeof(Vertex) * planeData.vertices.size();
     VkDeviceSize pISize = sizeof(uint32_t) * planeData.indices.size();
-    planeMesh.vertexAlloc = mem.allocateGeometry(pVSize);
-    planeMesh.indexAlloc = mem.allocateGeometry(pISize);
-    planeMesh.primitives = { planeData.primitive };
-    planeMesh.defaultDescriptorSet = m_gridDescriptorSet;
+
+    MeshComponent planeMesh {
+        .vertexAlloc = mem.allocateGeometry(pVSize),
+        .indexAlloc = mem.allocateGeometry(pISize),
+        .firstIndex = planeData.primitive.firstIndex,
+        .indexCount = planeData.primitive.indexCount,
+        .vertexOffset = planeData.primitive.vertexOffset,
+        .defaultDescriptorSet = m_gridDescriptorSet
+    };
 
     VkCommandBuffer cmd = context.beginSingleTimeCommands();
     mem.sendStagingData(cmd, context.getUploadTimelineSemaphore(), ++context.getUploadTimelineValue(),
@@ -69,16 +82,21 @@ void SandboxScene::init(ecs::World& world, VulkanContext& context) {
 
     world.addComponent<MeshComponent>(m_planeEntity, planeMesh);
 
-    // Capsule mesh
+    // Shared Capsule Mesh Setup
     CapsuleColliderComponent capsuleCollider { .radius = 0.4f, .halfHeight = 0.5f };
     auto capsuleData = MeshGenerator::createCapsule(capsuleCollider.radius, capsuleCollider.halfHeight);
 
     VkDeviceSize cVSize = sizeof(Vertex) * capsuleData.vertices.size();
     VkDeviceSize cISize = sizeof(uint32_t) * capsuleData.indices.size();
-    m_sharedCapsuleMesh.vertexAlloc = mem.allocateGeometry(cVSize);
-    m_sharedCapsuleMesh.indexAlloc = mem.allocateGeometry(cISize);
-    m_sharedCapsuleMesh.primitives = { capsuleData.primitive };
-    m_sharedCapsuleMesh.defaultDescriptorSet = m_localPlayerDescriptorSet;
+
+    m_sharedCapsuleMesh = MeshComponent {
+        .vertexAlloc = mem.allocateGeometry(cVSize),
+        .indexAlloc = mem.allocateGeometry(cISize),
+        .firstIndex = capsuleData.primitive.firstIndex,
+        .indexCount = capsuleData.primitive.indexCount,
+        .vertexOffset = capsuleData.primitive.vertexOffset,
+        .defaultDescriptorSet = m_localPlayerDescriptorSet
+    };
 
     cmd = context.beginSingleTimeCommands();
     mem.sendStagingData(cmd, context.getUploadTimelineSemaphore(), ++context.getUploadTimelineValue(),
@@ -87,6 +105,7 @@ void SandboxScene::init(ecs::World& world, VulkanContext& context) {
         m_sharedCapsuleMesh.indexAlloc.allocated, m_sharedCapsuleMesh.indexAlloc.offset, capsuleData.indices.data(), cISize);
     context.endSingleTimeCommands(cmd);
 
+    // Spawn Local Player Entity
     m_localPlayerEntity = world.createEntity();
     world.addComponent<TransformComponent>(m_localPlayerEntity, TransformComponent { .position = { 0.0f, 3.0f, 0.0f } });
     world.addComponent<CapsuleColliderComponent>(m_localPlayerEntity, capsuleCollider);
@@ -99,15 +118,221 @@ void SandboxScene::init(ecs::World& world, VulkanContext& context) {
     );
     world.addComponent<RigidBodyComponent>(m_localPlayerEntity, playerRb);
 
-    // Prediction buffer for local player
-    LocalPlayerPredictionComponent predComp {};
-    predComp.stateHistory[0] = PredictedState {
-        .tick = 0,
-        .position = { 0.0f, 3.0f, 0.0f },
-        .velocity = { 0.0f, 0.0f, 0.0f },
-        .isGrounded = false
-    };
-    world.addComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity, predComp);
+    // Only attach LocalPlayerPredictionComponent if we are in Client mode
+    // In Singleplayer & ListenServer, prediction is skipped saving CPU cycles
+    if (m_networkMode == NetworkMode::Client) {
+        LocalPlayerPredictionComponent predComp {};
+        predComp.stateHistory[0] = PredictedState {
+            .tick = 0,
+            .position = { 0.0f, 3.0f, 0.0f },
+            .velocity = { 0.0f, 0.0f, 0.0f },
+            .isGrounded = false
+        };
+        world.addComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity, predComp);
+    }
+}
+
+void SandboxScene::applyWorldSnapshot(ecs::World& world, VulkanContext& context, const net::WorldSnapshotPacket& snapshot) {
+    if (m_localNetworkId == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < snapshot.entityCount; ++i) {
+        const auto& data = snapshot.entities[i];
+        glm::vec3 pos(data.posX, data.posY, data.posZ);
+        glm::vec3 vel(data.velX, data.velY, data.velZ);
+
+        if (!m_networkEntities.contains(data.networkId)) {
+            ecs::Entity entityToUse = ecs::NULL_ENTITY;
+
+            if (data.networkId == m_localNetworkId) {
+                entityToUse = m_localPlayerEntity;
+            } else {
+                entityToUse = world.createEntity();
+                world.addComponent<TransformComponent>(entityToUse, TransformComponent { .position = pos });
+                world.addComponent<CapsuleColliderComponent>(entityToUse, CapsuleColliderComponent { .radius = 0.4f, .halfHeight = 0.5f });
+
+                MeshComponent remoteMesh = m_sharedCapsuleMesh;
+                remoteMesh.defaultDescriptorSet = m_remotePlayerDescriptorSet;
+                world.addComponent<MeshComponent>(entityToUse, remoteMesh);
+
+                SDL_Log("[Client] Spawned Remote Player (NetID=%u)", data.networkId);
+            }
+
+            m_networkEntities[data.networkId] = entityToUse;
+        }
+
+        // Local Player: Error checking and rollback resimulation
+        if (ENABLE_PREDICTION &&
+            m_networkMode == NetworkMode::Client &&
+            data.networkId == m_localNetworkId &&
+            world.hasComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity)) {
+
+            auto& pred = world.getComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity);
+            auto& rb = world.getComponent<RigidBodyComponent>(m_localPlayerEntity);
+            auto& controller = world.getComponent<CharacterControllerComponent>(m_localPlayerEntity);
+            auto& tf = world.getComponent<TransformComponent>(m_localPlayerEntity);
+
+            const uint32_t ackTick = snapshot.acknowledgedClientTick;
+
+            if (ackTick > pred.lastAcknowledgedServerTick && ackTick <= pred.currentClientTick) {
+                pred.lastAcknowledgedServerTick = ackTick;
+
+                const size_t ackSlot = ackTick % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
+                const auto& predictedState = pred.stateHistory[ackSlot];
+
+                glm::vec3 delta = pos - predictedState.position;
+
+                const float horizErrorSq = (delta.x * delta.x) + (delta.z * delta.z);
+                const float vertErrorSq = (delta.y * delta.y);
+
+                constexpr float HORIZ_THRESHOLD_SQ = 0.008f * 0.008f; // 8 mm
+                constexpr float VERT_THRESHOLD_SQ = 0.025f * 0.025f; // 25 mm
+
+                if (horizErrorSq > HORIZ_THRESHOLD_SQ || vertErrorSq > VERT_THRESHOLD_SQ) {
+                    // Accumulate visual offset to avoid camera/mesh snap
+                    pred.visualErrorOffset += (predictedState.position - pos);
+
+                    // Snap physical rigid body to server ground truth
+                    b3Body_SetTransform(rb.bodyId, b3Vec3 { pos.x, pos.y, pos.z }, b3Body_GetRotation(rb.bodyId));
+                    b3Body_SetLinearVelocity(rb.bodyId, b3Vec3 { vel.x, vel.y, vel.z });
+                    controller.isGrounded = (data.isGrounded != 0);
+
+                    auto& physics = world.getSingleton<physics::PhysicsWorldSingleton>();
+                    constexpr float FIXED_TIMESTEP = 1.0f / 60.0f;
+
+                    // Roll forward and resimulate unacknowledged commands
+                    for (uint32_t t = ackTick + 1; t <= pred.currentClientTick; ++t) {
+                        const size_t slot = t % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
+                        const auto& cmd = pred.inputHistory[slot];
+
+                        // Unpack UserCmd into directional vectors and actions
+                        glm::vec3 moveDir(
+                            net::UserCmd::unpackAxis(cmd.moveX),
+                            0.0f,
+                            net::UserCmd::unpackAxis(cmd.moveZ)
+                        );
+                        bool jumpRequested = (cmd.actions & net::Action_Jump) != 0;
+
+                        CharacterMovementSystem::step(rb, controller, moveDir, jumpRequested);
+                        b3World_Step(physics.worldId, FIXED_TIMESTEP, 4);
+
+                        b3Vec3 newPos = b3Body_GetPosition(rb.bodyId);
+                        b3Vec3 newVel = b3Body_GetLinearVelocity(rb.bodyId);
+
+                        const float footY = newPos.y - 0.9f;
+                        controller.isGrounded = (footY <= 0.05f) && (newVel.y <= 0.1f);
+
+                        pred.stateHistory[slot] = PredictedState {
+                            .tick = t,
+                            .position = { newPos.x, newPos.y, newPos.z },
+                            .velocity = { newVel.x, newVel.y, newVel.z },
+                            .isGrounded = controller.isGrounded
+                        };
+                    }
+
+                    // Write resimulated position into Transform
+                    const size_t currSlot = pred.currentClientTick % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
+                    tf.position = pred.stateHistory[currSlot].position;
+                }
+            }
+        } else {
+            // Remote player: Direct snapshot position
+            ecs::Entity entity = m_networkEntities[data.networkId];
+            if (world.hasComponent<TransformComponent>(entity)) {
+                auto& tf = world.getComponent<TransformComponent>(entity);
+                tf.position = pos;
+            }
+        }
+    }
+
+    // Cleanup disconnected players
+    for (auto it = m_networkEntities.begin(); it != m_networkEntities.end(); ) {
+        uint32_t netId = it->first;
+        bool exists = false;
+        for (uint32_t i = 0; i < snapshot.entityCount; ++i) {
+            if (snapshot.entities[i].networkId == netId) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            if (it->second != m_localPlayerEntity && world.isAlive(it->second)) {
+                world.destroyEntity(it->second);
+                SDL_Log("[Client] Despawned Remote Player (NetID=%u)", netId);
+            }
+            it = m_networkEntities.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void SandboxScene::update(ecs::World& world, float aspectRatio, float deltaTime) {
+    if (world.hasComponent<TransformComponent>(m_localPlayerEntity) &&
+        world.hasComponent<CameraComponent>(m_cameraEntity)) {
+
+        auto& playerTransform = world.getComponent<TransformComponent>(m_localPlayerEntity);
+        auto& cam = world.getComponent<CameraComponent>(m_cameraEntity);
+
+        if (world.hasComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity)) {
+            auto& pred = world.getComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity);
+            auto& rb = world.getComponent<RigidBodyComponent>(m_localPlayerEntity);
+
+            // Exponential visual error decay
+            float decayFactor = std::exp(-25.0f * deltaTime);
+            pred.visualErrorOffset *= decayFactor;
+            if (glm::dot(pred.visualErrorOffset, pred.visualErrorOffset) < 0.00001f) {
+                pred.visualErrorOffset = glm::vec3(0.0f);
+            }
+
+            b3Vec3 physPos = b3Body_GetPosition(rb.bodyId);
+            playerTransform.position = glm::vec3(physPos.x, physPos.y, physPos.z) + pred.visualErrorOffset;
+        }
+
+        cam.target = playerTransform.position;
+    }
+
+    CameraSystem::update(world, aspectRatio);
+}
+
+void SandboxScene::fixedUpdate(ecs::World& world, float fixedDt) {
+    CharacterMovementSystem::update(world, fixedDt);
+    PhysicsSystem::update(world, fixedDt);
+}
+
+void SandboxScene::render(ecs::World& world, VkCommandBuffer cmd, VulkanContext& context) {
+    RenderSystem::recordCommands(world, cmd, m_pipelineLayout, m_graphicsPipeline, m_cameraEntity);
+}
+
+void SandboxScene::shutdown(ecs::World& world, VulkanContext& context) {
+    VkDevice dev = context.getDevice();
+    auto& mem = context.getMemoryManager();
+
+    if (world.hasSingleton<physics::PhysicsWorldSingleton>()) {
+        world.getSingleton<physics::PhysicsWorldSingleton>().shutdown();
+    }
+
+    if (world.isAlive(m_planeEntity) && world.hasComponent<MeshComponent>(m_planeEntity)) {
+        auto& m = world.getComponent<MeshComponent>(m_planeEntity);
+        mem.freeGeometry(m.vertexAlloc);
+        mem.freeGeometry(m.indexAlloc);
+    }
+
+    mem.freeGeometry(m_sharedCapsuleMesh.vertexAlloc);
+    mem.freeGeometry(m_sharedCapsuleMesh.indexAlloc);
+
+    mem.destroyImage(m_gridTexture);
+    mem.destroyImage(m_localPlayerTexture);
+    mem.destroyImage(m_remotePlayerTexture);
+
+    if (m_graphicsPipeline) {
+        vkDestroyPipeline(dev, m_graphicsPipeline, nullptr);
+        m_graphicsPipeline = VK_NULL_HANDLE;
+    }
+    if (m_pipelineLayout) {
+        vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);
+        m_pipelineLayout = VK_NULL_HANDLE;
+    }
 }
 
 void SandboxScene::createGridTexture(VulkanContext& context) {
@@ -157,7 +382,7 @@ void SandboxScene::createPlayerTextures(VulkanContext& context) {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
     };
 
-    std::vector<uint32_t> localPixels(16 * 16, 0xFF00E5FF);
+    std::vector<uint32_t> localPixels(16 * 16, 0xFFD44124);
     m_localPlayerTexture = mem.createImage(imgInfo, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
     VkCommandBuffer cmd = context.beginSingleTimeCommands();
     mem.sendStagingImageData(cmd, context.getUploadTimelineSemaphore(), ++context.getUploadTimelineValue(),
@@ -165,7 +390,7 @@ void SandboxScene::createPlayerTextures(VulkanContext& context) {
     context.endSingleTimeCommands(cmd);
     m_localPlayerDescriptorSet = context.createTextureDescriptor(m_localPlayerTexture.defaultView);
 
-    std::vector<uint32_t> remotePixels(16 * 16, 0xFFFF6D00);
+    std::vector<uint32_t> remotePixels(16 * 16, 0xFF242DD4);
     m_remotePlayerTexture = mem.createImage(imgInfo, VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE);
     cmd = context.beginSingleTimeCommands();
     mem.sendStagingImageData(cmd, context.getUploadTimelineSemaphore(), ++context.getUploadTimelineValue(),
@@ -266,198 +491,6 @@ void SandboxScene::createPipeline(VulkanContext& context) {
 
     vkDestroyShaderModule(device, vertShader, nullptr);
     vkDestroyShaderModule(device, fragShader, nullptr);
-}
-
-void SandboxScene::fixedUpdate(ecs::World& world, float fixedDt) {
-    CharacterMovementSystem::update(world, fixedDt);
-    PhysicsSystem::update(world, fixedDt);
-}
-
-void SandboxScene::applyWorldSnapshot(ecs::World& world, VulkanContext& context, const net::WorldSnapshotPacket& snapshot) {
-    for (uint32_t i = 0; i < snapshot.entityCount; ++i) {
-        const auto& data = snapshot.entities[i];
-        glm::vec3 pos(data.posX, data.posY, data.posZ);
-        glm::vec3 vel(data.velX, data.velY, data.velZ);
-
-        if (!m_networkEntities.contains(data.networkId)) {
-            ecs::Entity entityToUse = ecs::NULL_ENTITY;
-
-            if (data.networkId == m_localNetworkId) {
-                entityToUse = m_localPlayerEntity;
-            } else {
-                entityToUse = world.createEntity();
-                world.addComponent<TransformComponent>(entityToUse, TransformComponent { .position = pos });
-                world.addComponent<CapsuleColliderComponent>(entityToUse, CapsuleColliderComponent { .radius = 0.4f, .halfHeight = 0.5f });
-
-                MeshComponent remoteMesh = m_sharedCapsuleMesh;
-                remoteMesh.defaultDescriptorSet = m_remotePlayerDescriptorSet;
-                world.addComponent<MeshComponent>(entityToUse, remoteMesh);
-
-                SDL_Log("[Client] Spawned Remote Player (NetID=%u)", data.networkId);
-            }
-
-            m_networkEntities[data.networkId] = entityToUse;
-        }
-
-
-        // Local Player: Error checking and rollback resimulation
-        if (ENABLE_PREDICTION && data.networkId == m_localNetworkId && world.hasComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity)) {
-            auto& pred = world.getComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity);
-            auto& rb = world.getComponent<RigidBodyComponent>(m_localPlayerEntity);
-            auto& controller = world.getComponent<CharacterControllerComponent>(m_localPlayerEntity);
-            auto& tf = world.getComponent<TransformComponent>(m_localPlayerEntity);
-
-            const uint32_t ackTick = snapshot.acknowledgedClientTick;
-
-            // Validate only fresh confirmations within current tick
-            if (ackTick > pred.lastAcknowledgedServerTick && ackTick <= pred.currentClientTick) {
-                pred.lastAcknowledgedServerTick = ackTick;
-
-                const size_t ackSlot = ackTick % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
-                const auto& predictedState = pred.stateHistory[ackSlot];
-
-                // Threshold squared / 5mm = 0.005m
-                glm::vec3 delta = pos - predictedState.position;
-                constexpr float THRESHOLD_SQ = 0.005f * 0.005f;
-
-                if (glm::dot(delta, delta) > THRESHOLD_SQ) {
-                    // Keep the error vector for rendering smoothing
-                    pred.visualErrorOffset += (predictedState.position - pos);
-
-                    // Rollback RB according to server authority
-                    b3Body_SetTransform(rb.bodyId, b3Vec3 { pos.x, pos.y, pos.z }, b3Body_GetRotation(rb.bodyId));
-                    b3Body_SetLinearVelocity(rb.bodyId, b3Vec3 { vel.x, vel.y, vel.z });
-                    controller.isGrounded = (data.isGrounded != 0);
-
-                    auto& physics = world.getSingleton<physics::PhysicsWorldSingleton>();
-                    constexpr float FIXED_TIMESTEP = 1.0f / 60.0f;
-
-                    // Resimulating unacknowledged ticks: (ackTick + 1) -> currentClientTick
-                    for (uint32_t t = ackTick + 1; t <= pred.currentClientTick; ++t) {
-                        const size_t slot = t % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
-                        const auto& input = pred.inputHistory[slot];
-
-                        // Applying input history
-                        CharacterMovementSystem::step(rb, controller, input.moveDir, input.jumpRequested);
-
-                        // Physical world step
-                        b3World_Step(physics.worldId, FIXED_TIMESTEP, 4);
-
-                        // Rewrite predicted state
-                        b3Vec3 newPos = b3Body_GetPosition(rb.bodyId);
-                        b3Vec3 newVel = b3Body_GetLinearVelocity(rb.bodyId);
-
-                        pred.stateHistory[slot] = PredictedState {
-                            .tick = t,
-                            .position = { newPos.x, newPos.y, newPos.z },
-                            .velocity = { newVel.x, newVel.y, newVel.z },
-                            .isGrounded = controller.isGrounded
-                        };
-                    }
-
-                    // Sync final position in TransformComponent
-                    const size_t currSlot = pred.currentClientTick % LocalPlayerPredictionComponent::HISTORY_CAPACITY;
-                    tf.position = pred.stateHistory[currSlot].position;
-                }
-            }
-        }
-        // Deleted player: Direct position update
-        else {
-            ecs::Entity entity = m_networkEntities[data.networkId];
-            if (world.hasComponent<TransformComponent>(entity)) {
-                auto& tf = world.getComponent<TransformComponent>(entity);
-                tf.position = pos;
-
-                // If prediction disabled, physicall collider is teleported
-                if (!ENABLE_PREDICTION && entity == m_localPlayerEntity) {
-                    auto& rb = world.getComponent<RigidBodyComponent>(entity);
-                    b3Body_SetTransform(rb.bodyId, b3Vec3 { pos.x, pos.y, pos.z }, b3Body_GetRotation(rb.bodyId));
-                    b3Body_SetLinearVelocity(rb.bodyId, b3Vec3 { vel.x, vel.y, vel.z });
-                }
-            }
-        }
-    }
-
-    // Delete disconnected players
-    for (auto it = m_networkEntities.begin(); it != m_networkEntities.end(); ) {
-        uint32_t netId = it->first;
-        bool exists = false;
-        for (uint32_t i = 0; i < snapshot.entityCount; ++i) {
-            if (snapshot.entities[i].networkId == netId) { exists = true; break; }
-        }
-        if (!exists) {
-            if (it->second != m_localPlayerEntity) {
-                world.destroyEntity(it->second);
-            }
-            it = m_networkEntities.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void SandboxScene::update(ecs::World& world, float aspectRatio, float deltaTime) {
-    if (world.hasComponent<TransformComponent>(m_localPlayerEntity) &&
-        world.hasComponent<CameraComponent>(m_cameraEntity)) {
-
-        auto& playerTransform = world.getComponent<TransformComponent>(m_localPlayerEntity);
-        auto& cam = world.getComponent<CameraComponent>(m_cameraEntity);
-
-        if (world.hasComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity)) {
-            auto& pred = world.getComponent<LocalPlayerPredictionComponent>(m_localPlayerEntity);
-            auto& rb = world.getComponent<RigidBodyComponent>(m_localPlayerEntity);
-
-            float decayFactor = std::exp(-25.0f * deltaTime);
-            pred.visualErrorOffset *= decayFactor;
-            if (glm::dot(pred.visualErrorOffset, pred.visualErrorOffset) < 0.00001f) {
-                pred.visualErrorOffset = glm::vec3(0.0f);
-            }
-
-            b3Vec3 physPos = b3Body_GetPosition(rb.bodyId);
-
-            playerTransform.position = glm::vec3(physPos.x, physPos.y, physPos.z) + pred.visualErrorOffset;
-            
-        }
-
-        cam.target = playerTransform.position;
-    }
-
-    CameraSystem::update(world, aspectRatio);
-}
-
-void SandboxScene::render(ecs::World& world, VkCommandBuffer cmd, VulkanContext& context) {
-    RenderSystem::recordCommands(world, cmd, m_pipelineLayout, m_graphicsPipeline, m_cameraEntity);
-}
-
-void SandboxScene::shutdown(ecs::World& world, VulkanContext& context) {
-    VkDevice dev = context.getDevice();
-    auto& mem = context.getMemoryManager();
-
-    if (world.hasSingleton<physics::PhysicsWorldSingleton>()) {
-        world.getSingleton<physics::PhysicsWorldSingleton>().shutdown();
-    }
-
-    if (world.hasComponent<MeshComponent>(m_planeEntity)) {
-        auto& m = world.getComponent<MeshComponent>(m_planeEntity);
-        mem.freeGeometry(m.vertexAlloc);
-        mem.freeGeometry(m.indexAlloc);
-    }
-
-    mem.freeGeometry(m_sharedCapsuleMesh.vertexAlloc);
-    mem.freeGeometry(m_sharedCapsuleMesh.indexAlloc);
-
-    mem.destroyImage(m_gridTexture);
-    mem.destroyImage(m_localPlayerTexture);
-    mem.destroyImage(m_remotePlayerTexture);
-
-    if (m_graphicsPipeline) {
-        vkDestroyPipeline(dev, m_graphicsPipeline, nullptr);
-        m_graphicsPipeline = VK_NULL_HANDLE;
-    }
-    if (m_pipelineLayout) {
-        vkDestroyPipelineLayout(dev, m_pipelineLayout, nullptr);
-        m_pipelineLayout = VK_NULL_HANDLE;
-    }
 }
 
 } // namespace irox
